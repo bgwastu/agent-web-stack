@@ -45,6 +45,7 @@ services:
       - CAMOFOX_URL=http://camofox-browser:9377
       - TAVILY_SHIM_HOST=0.0.0.0
       - TAVILY_SHIM_PORT=33879
+      - CAMOFOX_ONLY_SITES=${CAMOFOX_ONLY_SITES:-linkedin.com,facebook.com,x.com}
     depends_on:
       camofox-browser:
         condition: service_healthy
