@@ -41,6 +41,22 @@ PORT = int(os.environ.get("TAVILY_SHIM_PORT", "33879"))
 _CAMOFOX_ONLY_RAW = os.environ.get("CAMOFOX_ONLY_SITES", "").strip()
 CAMOFOX_ONLY_SITES = {s.strip().lower() for s in _CAMOFOX_ONLY_RAW.split(",") if s.strip()}
 
+# Domains that are entirely skipped from extraction (no fetch attempted).
+# Returns a stub message explaining the skip. Comma-separated, matches domain + all subdomains.
+_SKIP_SITES_RAW = os.environ.get("SKIP_SITES", "").strip()
+SKIP_SITES = {s.strip().lower() for s in _SKIP_SITES_RAW.split(",") if s.strip()}
+
+# ── AI Summarizer Configuration ─────────────────────────────────────────────
+# When enabled, extracted content is summarized via an OpenAI-compatible API
+# before being returned. The summary replaces raw_content so Hermes' web_extract
+# sees content < 5000 chars and passes it through without re-summarizing.
+SUMMARIZE_EXTRACT = os.environ.get("SUMMARIZE_EXTRACT", "true").lower() in ("1", "true", "yes")
+SUMMARIZER_BASE_URL = os.environ.get("SUMMARIZER_BASE_URL", "https://opencode.ai/zen/go/v1").rstrip("/")
+SUMMARIZER_API_KEY = os.environ.get("SUMMARIZER_API_KEY", "")
+SUMMARIZER_MODEL = os.environ.get("SUMMARIZER_MODEL", "deepseek-v4-flash")
+SUMMARIZER_MAX_CHARS = int(os.environ.get("SUMMARIZER_MAX_CHARS", "4900"))
+SUMMARIZER_MAX_TOKENS = int(os.environ.get("SUMMARIZER_MAX_TOKENS", "8000"))  # 8K output tokens (reasoning suppressed → fits comfortably)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
@@ -356,7 +372,125 @@ class TavilyHandler(BaseHTTPRequestHandler):
         log.info("%s - %s", self.client_address[0], fmt % args)
 
 
+# ── AI Summarization ────────────────────────────────────────────────────────
+
+def _summarize_content(content, url="", title=""):
+    """Extract the main article content from a web page using an LLM.
+
+    Strips navigation, sidebars, ads, footers, and other non-content boilerplate
+    while preserving the original article format and structure.
+    Falls back to raw content if extraction fails or content is already small.
+    """
+    if not SUMMARIZE_EXTRACT or not content or not SUMMARIZER_API_KEY:
+        return content
+
+    content_len = len(content)
+    if content_len < 500:
+        return content  # too short to bother
+
+    max_chars = SUMMARIZER_MAX_CHARS
+    if content_len <= max_chars:
+        return content  # already fits within limit
+
+    prompt = (
+        "You are a precise content extractor. Extract the main article content "
+        "from the following page and remove all navigation, sidebars, ads, footers, "
+        "cookie banners, related links, and other non-content elements. "
+        "Preserve ALL important details: specific numbers, statistics, quotes, "
+        "dates, names, technical terms, and nuanced arguments. "
+        "Return the content as clean markdown keeping its original structure — "
+        "headings, paragraphs, lists, tables, code blocks in their original order. "
+        "Do NOT rewrite or restructure — just remove the junk.\n\n"
+        f"Aim for about {max_chars} characters. "
+        f"Hard maximum: {max_chars} characters. "
+        "If the source is already markdown, keep its structure. "
+        "If it's a forum post or discussion, preserve the arguments and counterpoints.\n\n"
+        "IMPORTANT: Do NOT show your reasoning or thinking process. "
+        "Output ONLY the extracted content directly, without any preamble or explanation. "
+        "Skip the chain-of-thought and go straight to the answer.\n\n"
+        "PAGE CONTENT:\n"
+        f"{'─' * 60}\n"
+        f"Title: {title}\n"
+        f"URL: {url}\n"
+        f"{'─' * 60}\n"
+        f"{content}\n"
+        f"{'─' * 60}"
+    )
+
+    body = json.dumps({
+        "model": SUMMARIZER_MODEL,
+        "messages": [
+            {"role": "system", "content": "You extract article content from web pages. Remove navigation, sidebar, footer, ads. Return only the article in the original format. No summaries, no rewrites, no explanations."},
+            {"role": "user", "content": prompt},
+        ],
+        "max_tokens": SUMMARIZER_MAX_TOKENS if SUMMARIZER_MAX_TOKENS else int(max_chars * 1.8),
+        "temperature": 0.0,  # deterministic once thinking is off
+        "thinking": {"type": "disabled"},  # disable reasoning/thinking for speed
+    }).encode()
+
+    try:
+        req = urllib.request.Request(
+            f"{SUMMARIZER_BASE_URL}/chat/completions",
+            data=body,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {SUMMARIZER_API_KEY}",
+                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
+            },
+            method="POST",
+        )
+        resp = urllib.request.urlopen(req, timeout=120)
+        data = json.loads(resp.read())
+        choice = data["choices"][0]["message"]
+        summary = (choice.get("content") or choice.get("reasoning_content") or choice.get("reasoning") or "").strip()
+
+        # Enforce hard cap
+        if len(summary) > max_chars:
+            summary = summary[:max_chars].rsplit(" ", 1)[0] + " […]"
+
+        log.info(
+            "summarized %s -> %d chars (%.1f%% compression) using %s",
+            title or url, len(summary),
+            (1 - len(summary) / content_len) * 100,
+            SUMMARIZER_MODEL,
+        )
+        return summary
+    except Exception as e:
+        log.warning("summarization failed for %s: %s — returning raw content", url, e)
+        return content  # fallback to full content on failure
+
+
 # ── Fetch Strategy ─────────────────────────────────────────────────────────
+
+def _apply_summarizer(result):
+    """Run a fetch result through the AI content cleaner.
+
+    Strips navigation, sidebars, ads, footers, and other non-content boilerplate
+    from large pages. The clean content is returned as `raw_content` (≤4900 chars)
+    so the Tavily provider sees content < 5000 chars and Hermes skips its own LLM
+    summarization. Small content passes through untouched.
+    """
+    if not result or not result.get("raw_content"):
+        return result
+
+    raw = result["raw_content"]
+    title = result.get("title", "")
+    url = result.get("url", "")
+
+    # Summarize if enabled and content is large enough
+    needs_summary = SUMMARIZE_EXTRACT and len(raw) > 5000
+    if needs_summary:
+        summarized = _summarize_content(raw, url, title)
+        result["raw_content"] = summarized
+        result["content"] = summarized  # provider uses content if raw_content absent
+        result["summarized"] = True
+        result["original_size"] = len(raw)
+    else:
+        # Still return as `content` so provider has a clean path
+        result["content"] = raw
+
+    return result
+
 
 def _fetch_url(url, include_images=False):
     """Extract content from a URL using the best strategy.
@@ -366,6 +500,10 @@ def _fetch_url(url, include_images=False):
       2. Detect if URL points to a downloadable file → file-to-markdown
       3. Non-Reddit URLs → markdown.new first, JSON error → Camoufox fallback
       4. Also checks for /llms.txt on the domain
+
+    After fetching, if SUMMARIZE_EXTRACT is enabled and content is large,
+    runs it through an LLM summarizer. Returns `content` (not `raw_content`)
+    so the Tavily provider picks it up as-is (< 5000 chars → Hermes skips LLM).
     """
     parsed = urlparse(url)
     domain = parsed.netloc.lower()
@@ -373,14 +511,28 @@ def _fetch_url(url, include_images=False):
     # ── Camoufox-only sites (configured via CAMOFOX_ONLY_SITES) ──────
     if _is_camofox_only_site(domain):
         log.info("camofox-only fetch: %s (via Camoufox, enforced by CAMOFOX_ONLY_SITES)", url)
-        return _extract_via_camoufox(url, include_images)
+        result = _extract_via_camoufox(url, include_images)
+        if result:
+            return _apply_summarizer(result)
+        return None
+
+    # ── Skip sites entirely (configured via SKIP_SITES) ──────────────
+    if _is_skip_site(domain):
+        log.info("skip-site: %s (domain in SKIP_SITES list)", url)
+        return {
+            "url": url,
+            "title": f"Content from {domain} was skipped",
+            "content": f"This page from {domain} was skipped during extraction as configured by SKIP_SITES. The raw content is not available.",
+            "raw_content": f"This page from {domain} was skipped during extraction as configured by SKIP_SITES. The raw content is not available.",
+            "source": "skipped",
+        }
 
     # ── Reddit special handling ──────────────────────────────────────
     if _is_reddit_url(domain, url):
         log.info("reddit fetch: %s (custom scraper via Camoufox)", url)
         result = _fetch_reddit_custom(url)
         if result:
-            return result
+            return _apply_summarizer(result)
         log.info("reddit scraper returned empty, fallback to Camoufox: %s", url)
 
     # ── Detect downloadable files ────────────────────────────────────
@@ -388,19 +540,18 @@ def _fetch_url(url, include_images=False):
         log.info("file fetch: %s (via markdown.new/file-to-markdown)", url)
         result = _fetch_via_markdown_file(url)
         if result:
-            return result
-        # Fallback: try Camoufox for file URLs
-        return _extract_via_camoufox(url, include_images)
+            return _apply_summarizer(result)
+        return _apply_summarizer(_extract_via_camoufox(url, include_images))
 
     # ── Standard URL: markdown.new first, Camoufox fallback ─────────
     log.info("markdown.new fetch: %s", url)
     result = _fetch_via_markdown_new(url)
     if result:
-        return result
+        return _apply_summarizer(result)
 
     # ── Camoufox fallback ────────────────────────────────────────────
     log.info("markdown.new failed, fallback to Camoufox: %s", url)
-    return _extract_via_camoufox(url, include_images)
+    return _apply_summarizer(_extract_via_camoufox(url, include_images))
 
 
 def _is_reddit_url(domain, url):
@@ -425,6 +576,17 @@ def _is_camofox_only_site(domain):
     for i in range(len(parts)):
         candidate = ".".join(parts[i:])
         if candidate in CAMOFOX_ONLY_SITES:
+            return True
+    return False
+
+def _is_skip_site(domain):
+    """Check if a domain is in the SKIP_SITES list (incl. subdomains)."""
+    if not SKIP_SITES:
+        return False
+    parts = domain.split(".")
+    for i in range(len(parts)):
+        candidate = ".".join(parts[i:])
+        if candidate in SKIP_SITES:
             return True
     return False
 
