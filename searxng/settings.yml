@@ -1,0 +1,229 @@
+use_default_settings: true
+
+general:
+  instance_name: "Hermes SearXNG"
+  privacypolicy_url: false
+  contact_url: false
+  enable_metrics: false
+  donation_url: false
+
+search:
+  safe_search: 0
+  autocomplete: google
+  default_lang: en
+  formats:
+    - html
+    - json
+  languages:
+    - en
+    - id
+
+server:
+  secret_key: "$SEARXNG_SECRET"
+  bind_address: "0.0.0.0"
+  port: 8080
+  limiter: true
+  public_instance: false
+  image_proxy: false
+  method: GET
+  http_protocol_version: "1.1"
+  base_url: "http://localhost:8880"
+
+valkey:
+  url: redis://searxng-redis:6379/0
+
+ui:
+  default_theme: simple
+  simple_style: auto
+  center_alignment: false
+
+outgoing:
+  request_timeout: 15.0
+  max_request_timeout: 45.0
+  retries: 2
+  retry_on_http_error: [429, 503]
+  enable_http2: true
+  pool_connections: 200
+  pool_maxsize: 50
+  proxies:
+    all://:
+      - http://10.0.0.2:8888
+  useragent_suffix: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+
+hostnames:
+  remove:
+    - '(.*\.)?marktechpost\.com$'
+    - '(.*\.)?analyticsvidhya\.com$'
+    - '(.*\.)?analyticsinsight\.net$'
+    - '(.*\.)?projectpro\.io$'
+    - '(.*\.)?kdnuggets\.com$'
+    - '(.*\.)?datasciencecentral\.com$'
+    - '(.*\.)?theresanaiforthat\.com$'
+    - '(.*\.)?futurepedia\.io$'
+    - '(.*\.)?toolify\.ai$'
+    - '(.*\.)?topai\.tools$'
+    - '(.*\.)?aitoptools\.com$'
+    - '(.*\.)?aifind\.tools$'
+    - '(.*\.)?gptforge\.net$'
+    - '(.*\.)?aipure\.ai$'
+    - '(.*\.)?opengenus\.org$'
+    - '(.*\.)?neptune\.ai$'
+    - '(.*\.)?comet\.com$'
+    - '(.*\.)?v7labs\.com$'
+    - '(.*\.)?machinelearningplus\.com$'
+    - '(.*\.)?datagy\.io$'
+    - '(.*\.)?hackernoon\.com$'
+    - '(.*\.)?aituts\.com$'
+    - '(.*\.)?aitrends\.com$'
+    - '(.*\.)?appgecet\.co\.in$'
+    - '(.*\.)?techspirited\.com$'
+    - '(.*\.)?techdogs\.com$'
+    - '(.*\.)?scaler\.com$'
+    - '(.*\.)?codingzap\.com$'
+    - '(.*\.)?beingcoders\.com$'
+    - '(.*\.)?coderscat\.com$'
+    - '(.*\.)?thecodinghub\.com$'
+    - '(.*\.)?adadbooks\.com$'
+    - '(.*\.)?i2tutorials\.com$'
+    - '(.*\.)?tutorialandexample\.com$'
+    - '(.*\.)?tutorialkart\.com$'
+    - '(.*\.)?javatpoint\.com$'
+    - '(.*\.)?guru99\.com$'
+    - '(.*\.)?dotnettutorials\.net$'
+    - '(.*\.)?stechies\.com$'
+    - '(.*\.)?linuxhint\.com$'
+    - '(.*\.)?itslinuxfoss\.com$'
+    - '(.*\.)?linuxfordevices\.com$'
+    - '(.*\.)?fosslinux\.com$'
+    - '(.*\.)?debugpointer\.com$'
+    - '(.*\.)?zerotomastery\.io$'
+    - '(.*\.)?askpython\.com$'
+    - '(.*\.)?pythonguides\.com$'
+    - '(.*\.)?w3resource\.com$'
+    - '(.*\.)?w3schools\.in$'
+    - '(.*\.)?w3schools\.blog$'
+    - '(.*\.)?studytonight\.com$'
+    - '(.*\.)?mindmajix\.com$'
+    - '(.*\.)?techbeamers\.com$'
+    - '(.*\.)?techiedelight\.com$'
+    - '(.*\.)?thegeekstuff\.com$'
+    - '(.*\.)?golinuxcloud\.com$'
+    - '(.*\.)?golangprograms\.com$'
+    - '(.*\.)?includehelp\.com$'
+    - '(.*\.)?interviewbit\.com$'
+    - '(.*\.)?logfetch\.com$'
+    - '(.*\.)?net-informations\.com$'
+    - '(.*\.)?sqlshack\.com$'
+    - '(.*\.)?unbiased-coder\.com$'
+    - '(.*\.)?wonderdevelop\.com$'
+    - '(.*\.)?copyprogramming\.com$'
+    - '(.*\.)?programmerclick\.com$'
+    - '(.*\.)?thecrazyprogrammer\.com$'
+    - '(.*\.)?csestack\.org$'
+    - '(.*\.)?hermes\.com$'
+    - '(.*\.)?pinterest\.(com|fr|de|es|it|jp|co\.uk)$'
+    - '(.*\.)?w3schools\.com$'
+    - '(.*\.)?geeksforgeeks\.org$'
+    - '(.*\.)?tutorialspoint\.com$'
+    - '(.*\.)?intellipaat\.com$'
+    - '(.*\.)?stackshare\.io$'
+    - '(.*\.)?codegrepper\.com$'
+    - '(.*\.)?chegg\.com$'
+    - '(.*\.)?coursehero\.com$'
+    - '(.*\.)?scribd\.com$'
+    - '(.*\.)?qastack\..*$'
+    - '(.*\.)?stackovernet\.com$'
+    - '(.*\.)?stackoom\.com$'
+    - '(.*\.)?stackoverrun\.com$'
+    - '(.*\.)?coder\.work$'
+    - '(.*\.)?newbedev\.com$'
+    - '(.*\.)?coderedirect\.com$'
+    - '(.*\.)?titanwolf\.org$'
+    - '(.*\.)?it1352\.com$'
+    - '(.*\.)?bleepcoder\.com$'
+    - '(.*\.)?gitmemory\.com$'
+    - '(.*\.)?giters\.com$'
+    - '(.*\.)?githubmemory\.com$'
+    - '(.*\.)?githubhelp\.com$'
+    - '(.*\.)?reposhub\.com$'
+    - '(.*\.)?flipboard\.com$'
+    - '(.*\.)?askinglot\.com$'
+    - '(.*\.)?quora\.com$'
+    - '(.*\.)?answers\.com$'
+    - '(.*\.)?yahoo\.com$'
+    - '(.*\.)?tmz\.com$'
+    - '(.*\.)?buzzfeed\.com$'
+    - '(.*\.)?mypikpak\.com$'
+    - '(.*\.)?pikpak\.com$'
+    - '(.*\.)?techtarget\.com$'
+    - '(.*\.)?search\.(com|net|org)$'
+    - '(.*\.)?knowyourmeme\.com$'
+  high_priority:
+    - '(.*\.)?github\.com$'
+    - '(.*\.)?reddit\.com$'
+    - '(.*\.)?wikipedia\.org$'
+    - '(.*\.)?arxiv\.org$'
+    - '(.*\.)?stackoverflow\.com$'
+    - '(.*\.)?news\.ycombinator\.com$'
+    - '(.*\.)?nvidia\.com$'
+    - '(.*\.)?microsoft\.com$'
+    - '(.*\.)?googleblog\.com$'
+    - '(.*\.)?blog\.google$'
+    - '(.*\.)?nousresearch\.com$'
+    - '(.*\.)?firecrawl\.dev$'
+    - '(.*\.)?react\.dev$'
+    - '(.*\.)?docs\.docker\.com$'
+    - '(.*\.)?kubernetes\.io$'
+    - '(.*\.)?pypi\.org$'
+    - '(.*\.)?npmjs\.com$'
+    - '(.*\.)?crates\.io$'
+    - '(.*\.)?rust-lang\.org$'
+    - '(.*\.)?go\.dev$'
+    - '(.*\.)?python\.org$'
+  low_priority:
+    - '(.*\.)?facebook\.com$'
+    - '(.*\.)?instagram\.com$'
+    - '(.*\.)?tiktok\.com$'
+    - '(.*\.)?linkedin\.com$'
+    - '(.*\.)?medium\.com$'
+
+engines:
+  - name: google
+    weight: 3.0
+  - name: startpage
+    weight: 2.5
+  - name: brave
+    weight: 2.0
+  - name: duckduckgo
+    disabled: false
+    weight: 1.5
+  - name: bing
+    disabled: false
+    weight: 1.0
+  - name: qwant
+    disabled: false
+    weight: 0.5
+  - name: mojeek
+    disabled: false
+    weight: 0.3
+  - name: hackernews
+    disabled: false
+    weight: 5.0
+  - name: wikipedia
+    weight: 10.0
+  - name: wikidata
+    weight: 3.0
+  - name: stackoverflow
+    weight: 5.0
+  - name: github
+    weight: 5.0
+  - name: arxiv
+    weight: 5.0
+  - name: pubmed
+    weight: 3.0
+  - name: docker hub
+    weight: 2.0
+  - name: npm
+    weight: 2.0
+  - name: pypi
+    weight: 2.0

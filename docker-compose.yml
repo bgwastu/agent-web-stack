@@ -1,7 +1,8 @@
 services:
+  # ── Camofox Browser ─────────────────────────────────
   camofox-browser:
     build:
-      context: /home/wastu/projects/camofox-browser
+      context: ${CAMOFOX_BROWSER_PATH:-/home/wastu/projects/camofox-browser}
       args:
         - CAMOUFOX_VERSION=${CAMOUFOX_VERSION:-135.0.1}
         - CAMOUFOX_RELEASE=${CAMOUFOX_RELEASE:-beta.24}
@@ -26,6 +27,7 @@ services:
       retries: 3
       start_period: 30s
 
+  # ── Firecrawl Shim ─────────────────────────────────
   camofox-firecrawl-shim:
     build:
       context: ./firecrawl-shim
@@ -50,10 +52,59 @@ services:
       retries: 3
       start_period: 15s
 
+  # ── SearXNG Meta-Search ────────────────────────────
+  searxng:
+    image: searxng/searxng:latest
+    container_name: searxng
+    restart: unless-stopped
+    ports:
+      - "8880:8080"
+    networks:
+      - searxng-net
+    environment:
+      - SEARXNG_BASE_URL=http://localhost:8880
+      - SEARXNG_SECRET=${SEARXNG_SECRET:?required}
+    volumes:
+      - searxng_config:/etc/searxng
+      - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
+      - ./searxng/limiter.toml:/etc/searxng/limiter.toml:ro
+      - searxng_cache:/var/cache/searxng
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; r = urllib.request.urlopen('http://localhost:8080/search?q=health', timeout=5); assert r.status == 200\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    depends_on:
+      searxng-redis:
+        condition: service_started
+
+  searxng-redis:
+    image: redis:7-alpine
+    container_name: searxng-redis
+    restart: unless-stopped
+    networks:
+      - searxng-net
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
 networks:
   webstack-net:
+    driver: bridge
+  searxng-net:
     driver: bridge
 
 volumes:
   camofox-cache:
   camofox-config:
+  searxng_config:
+    external: true
+  searxng_cache:
+    external: true
+  redis-data:
+    external: true
