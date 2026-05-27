@@ -103,8 +103,11 @@ volumes:
   camofox-cache:
   camofox-config:
   searxng_config:
+    name: searxng_config
     external: true
   searxng_cache:
+    name: searxng_cache
     external: true
   redis-data:
+    name: searxng_redis-data
     external: true
