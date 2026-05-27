@@ -1,3 +1,0 @@
-# The shim uses only stdlib — no third-party deps.
-# Pandoc (apt) is used for HTML→Markdown conversion.
-# This file kept for future dep tracking.

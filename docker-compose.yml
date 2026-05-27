@@ -17,6 +17,7 @@ services:
       - PROXY_STRATEGY=single
       - PROXY_HOST=${PROXY_HOST:-10.0.0.2}
       - PROXY_PORT=${PROXY_PORT:-8888}
+      - CAMOFOX_PROFILE_DIR=/home/node/.config/camoufox/profiles
     volumes:
       - camofox-cache:/home/node/.cache/camoufox
       - camofox-config:/home/node/.config/camoufox
@@ -27,30 +28,34 @@ services:
       retries: 3
       start_period: 30s
 
-  # ── Firecrawl Shim ─────────────────────────────────
-  camofox-firecrawl-shim:
+  # ── Tavily Shim ─────────────────────────────────────
+  tavily-shim:
     build:
-      context: ./firecrawl-shim
-    container_name: camofox-firecrawl-shim
+      context: ./tavily-shim
+    container_name: tavily-shim
     restart: unless-stopped
     ports:
       - "33879:33879"
     networks:
       - webstack-net
+      - searxng-net
     environment:
+      - TAVILY_API_KEY=${TAVILY_API_KEY:?required}
+      - SEARXNG_URL=http://searxng:8080
       - CAMOFOX_URL=http://camofox-browser:9377
-      - CAMOFOX_FIRECRAWL_FIXED_USER_ID=${CAMOFOX_FIRECRAWL_FIXED_USER_ID:-agent}
-      - CAMOFOX_FIRECRAWL_SHIM_HOST=0.0.0.0
-      - LISTEN_PORT=33879
+      - TAVILY_SHIM_HOST=0.0.0.0
+      - TAVILY_SHIM_PORT=33879
     depends_on:
       camofox-browser:
         condition: service_healthy
+      searxng:
+        condition: service_started
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:33879/health', timeout=5)"]
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 15s
+      start_period: 10s
 
   # ── SearXNG Meta-Search ────────────────────────────
   searxng:
