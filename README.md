@@ -7,27 +7,30 @@ All-in-one self-hosted web infrastructure for AI agents — **Camoufox browser**
 ```
 AI Agent / Hermes Gateway
     │
-    ├── web_search ──► SearXNG (:8880)
-    │                       ├── Google (weight 3.0)
-    │                       ├── Startpage (weight 2.5)
-    │                       ├── Brave (weight 2.0)
-    │                       └── Bing, DDG, Qwant, Mojeek
+    ├── web_search ──► tavily-shim (:33879)
+    │                       └── SearXNG (backend)
     │
-    ├── web_extract ──► camofox-firecrawl-shim (:33879)
-    │                          │
-    │                          └──► camofox-browser (:9377)
-    │                                    │
-    │                                    └──► Residential proxy
+    ├── web_extract ──► tavily-shim (:33879)
+    │                       └── camofox-browser (:9377)
     │
     └── browser tools ──► camofox-browser REST API (:9377)
-```
+
+### Tavily API Compatibility
+
+The `tavily-shim` implements the [Tavily Search API](https://docs.tavily.com/) so any
+app or tool built for Tavily can use this self-hosted stack instead:
+
+| Tavily Endpoint | Our Backend | Status |
+|----------------|-------------|--------|
+| `POST /search` | SearXNG (Google, Bing, Brave, DDG, ...) | ✅ |
+| `POST /extract` | Camoufox browser (JS rendering) | ✅ |
 
 ### Services
 
 | Service | Port | Role |
 |---------|------|------|
 | **camofox-browser** | `9377` | Anti-detection headless Firefox (Camoufox). REST API for navigation, snapshots, clicks, typing. |
-| **camofox-firecrawl-shim** | `33879` | Firecrawl-compatible API bridge. Routes `web_extract` through Camofox for JS-rendered pages. |
+| **tavily-shim** | `33879` | Tavily-compatible API bridge — routes search to SearXNG, extract to Camoufox. |
 | **searxng** | `8880` | Self-hosted meta-search engine (Google, Bing, Brave, DDG, Qwant, Startpage, technical engines). |
 | **searxng-redis** | — | Redis for SearXNG rate limiting and result caching. |
 
@@ -147,33 +150,31 @@ Add to your Hermes profile `.env`:
 
 ```env
 CAMOFOX_URL=http://localhost:9377
-FIRECRAWL_API_URL=http://127.0.0.1:33879
-SEARXNG_URL=http://localhost:8880
+TAVILY_API_KEY=tavily-shim-dev-key
+TAVILY_API_URL=http://127.0.0.1:33879
 ```
 
-And to `config.yaml`:
+If using the Tavily extract backend:
 
 ```yaml
 web:
-  backend: searxng
-  extract_backend: firecrawl
+  extract_backend: tavily
 ```
 
 ## Migrating from Systemd / Standalone
 
-### Camofox browser + shim
+### Camofox browser
 
 ```bash
 # Stop native services
-sudo systemctl stop camofox-firecrawl-shim camofox-browser
-sudo systemctl disable camofox-firecrawl-shim camofox-browser
+sudo systemctl stop camofox-browser
+sudo systemctl disable camofox-browser
 
 # Start Docker stack
-docker compose up -d camofox-browser camofox-firecrawl-shim
+docker compose up -d camofox-browser tavily-shim
 
 # After confirming stable, remove old unit files
 sudo rm /etc/systemd/system/camofox-browser.service
-sudo rm /etc/systemd/system/camofox-firecrawl-shim.service
 sudo systemctl daemon-reload
 ```
 
@@ -197,14 +198,12 @@ Note: the volumes (`searxng_config`, `searxng_cache`, `redis-data`) are marked `
 agent-web-stack/
 ├── docker-compose.yml         # All 4 services
 ├── .env.example               # Configuration template
-├── scripts/
-│   └── check-camoufox-version.sh   # Daily Camoufox version checker
 ├── searxng/
 │   ├── settings.yml           # SearXNG engine config (version-controlled)
 │   └── limiter.toml           # Rate limiting whitelist
-├── firecrawl-shim/
+├── tavily-shim/
 │   ├── Dockerfile
-│   ├── shim.py
+│   ├── shim.py                # Tavily-compatible search + extract API
 │   └── requirements.txt
 └── README.md
 ```
@@ -225,9 +224,17 @@ agent-web-stack/
 | `DELETE` | `/tabs/:id` | Close tab |
 | `DELETE` | `/sessions/:userId` | Clear session data |
 
-### Camofox Firecrawl Shim (`:33879`)
+### Tavily Shim (`:33879`)
 
-Firecrawl v2-compatible API. See `firecrawl-shim/shim.py` for details.
+Full Tavily Search API compatibility:
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/search` | Web search (via SearXNG). Params: `query`, `search_depth`, `max_results`, `include_answer`, `include_images` |
+| `POST` | `/extract` | URL content extraction (via Camoufox). Params: `urls` (string or array), `include_images` |
+| `GET` | `/health` | Health check with upstream status |
+
+See [Tavily API Docs](https://docs.tavily.com/) for full request/response schemas.
 
 ### SearXNG (`:8880`)
 
