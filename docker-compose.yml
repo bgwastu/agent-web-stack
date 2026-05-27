@@ -1,7 +1,7 @@
 services:
   camofox-browser:
     build:
-      context: .
+      context: /home/wastu/projects/camofox-browser
       args:
         - CAMOUFOX_VERSION=${CAMOUFOX_VERSION:-135.0.1}
         - CAMOUFOX_RELEASE=${CAMOUFOX_RELEASE:-beta.24}
@@ -38,6 +38,7 @@ services:
     environment:
       - CAMOFOX_URL=http://camofox-browser:9377
       - CAMOFOX_FIRECRAWL_FIXED_USER_ID=${CAMOFOX_FIRECRAWL_FIXED_USER_ID:-agent}
+      - CAMOFOX_FIRECRAWL_SHIM_HOST=0.0.0.0
       - LISTEN_PORT=33879
     depends_on:
       camofox-browser:
