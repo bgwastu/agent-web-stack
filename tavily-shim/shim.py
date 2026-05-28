@@ -377,20 +377,31 @@ class TavilyHandler(BaseHTTPRequestHandler):
 def _summarize_content(content, url="", title=""):
     """Extract the main article content from a web page using an LLM.
 
-    Strips navigation, sidebars, ads, footers, and other non-content boilerplate
-    while preserving the original article format and structure.
-    Falls back to raw content if extraction fails or content is already small.
+    Truncates content to 15K chars before sending. Retries up to 3 times
+    on transient failures. Falls back to raw content if all retries fail.
+    Returns (content, was_summarized) tuple.
     """
     if not SUMMARIZE_EXTRACT or not content or not SUMMARIZER_API_KEY:
-        return content
+        return content, False
 
     content_len = len(content)
     if content_len < 500:
-        return content  # too short to bother
+        return content, False  # too short to bother
 
     max_chars = SUMMARIZER_MAX_CHARS
-    if content_len <= max_chars:
-        return content  # already fits within limit
+    if content_len <= max_chars * 2:
+        return content, False  # already compact enough
+
+    # Truncate input to 15K chars to avoid overwhelming the model
+    MAX_INPUT_CHARS = 15000
+    if content_len > MAX_INPUT_CHARS:
+        truncated = content[:MAX_INPUT_CHARS]
+        log.info(
+            "truncated content from %d to %d chars for %s",
+            content_len, MAX_INPUT_CHARS, title or url,
+        )
+    else:
+        truncated = content
 
     prompt = (
         "You are a precise content extractor. Extract the main article content "
@@ -413,7 +424,7 @@ def _summarize_content(content, url="", title=""):
         f"Title: {title}\n"
         f"URL: {url}\n"
         f"{'─' * 60}\n"
-        f"{content}\n"
+        f"{truncated}\n"
         f"{'─' * 60}"
     )
 
@@ -428,36 +439,53 @@ def _summarize_content(content, url="", title=""):
         "thinking": {"type": "disabled"},  # disable reasoning/thinking for speed
     }).encode()
 
-    try:
-        req = urllib.request.Request(
-            f"{SUMMARIZER_BASE_URL}/chat/completions",
-            data=body,
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {SUMMARIZER_API_KEY}",
-                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
-            },
-            method="POST",
-        )
-        resp = urllib.request.urlopen(req, timeout=120)
-        data = json.loads(resp.read())
-        choice = data["choices"][0]["message"]
-        summary = (choice.get("content") or choice.get("reasoning_content") or choice.get("reasoning") or "").strip()
+    # Retry up to 3 times with exponential backoff
+    max_retries = 3
+    last_error = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            req = urllib.request.Request(
+                f"{SUMMARIZER_BASE_URL}/chat/completions",
+                data=body,
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {SUMMARIZER_API_KEY}",
+                    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
+                },
+                method="POST",
+            )
+            resp = urllib.request.urlopen(req, timeout=300)
+            data = json.loads(resp.read())
+            choice = data["choices"][0]["message"]
+            summary = (choice.get("content") or choice.get("reasoning_content") or choice.get("reasoning") or "").strip()
 
-        # Enforce hard cap
-        if len(summary) > max_chars:
-            summary = summary[:max_chars].rsplit(" ", 1)[0] + " […]"
+            # Enforce hard cap
+            if len(summary) > max_chars:
+                summary = summary[:max_chars].rsplit(" ", 1)[0] + " […]"
 
-        log.info(
-            "summarized %s -> %d chars (%.1f%% compression) using %s",
-            title or url, len(summary),
-            (1 - len(summary) / content_len) * 100,
-            SUMMARIZER_MODEL,
-        )
-        return summary
-    except Exception as e:
-        log.warning("summarization failed for %s: %s — returning raw content", url, e)
-        return content  # fallback to full content on failure
+            compression = (1 - len(summary) / content_len) * 100
+            log.info(
+                "summarized %s -> %d chars (%.1f%% compression) using %s (attempt %d/%d)",
+                title or url, len(summary), compression,
+                SUMMARIZER_MODEL, attempt, max_retries,
+            )
+            return summary, True  # True = summarization succeeded
+
+        except Exception as e:
+            last_error = e
+            if attempt < max_retries:
+                backoff = 2 ** attempt  # 2, 4, 8 seconds
+                log.warning(
+                    "summarization attempt %d/%d failed for %s: %s — retrying in %ds",
+                    attempt, max_retries, url, e, backoff,
+                )
+                time.sleep(backoff)
+
+    log.warning(
+        "all %d summarization attempts failed for %s: %s — returning raw content",
+        max_retries, url, last_error,
+    )
+    return content, False  # all retries exhausted, return raw
 
 
 # ── Fetch Strategy ─────────────────────────────────────────────────────────
@@ -480,10 +508,10 @@ def _apply_summarizer(result):
     # Summarize if enabled and content is large enough
     needs_summary = SUMMARIZE_EXTRACT and len(raw) > 5000
     if needs_summary:
-        summarized = _summarize_content(raw, url, title)
+        summarized, was_summarized = _summarize_content(raw, url, title)
         result["raw_content"] = summarized
         result["content"] = summarized  # provider uses content if raw_content absent
-        result["summarized"] = True
+        result["summarized"] = was_summarized  # True only if LLM actually succeeded
         result["original_size"] = len(raw)
     else:
         # Still return as `content` so provider has a clean path
