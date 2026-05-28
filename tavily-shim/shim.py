@@ -41,10 +41,6 @@ PORT = int(os.environ.get("TAVILY_SHIM_PORT", "33879"))
 _CAMOFOX_ONLY_RAW = os.environ.get("CAMOFOX_ONLY_SITES", "").strip()
 CAMOFOX_ONLY_SITES = {s.strip().lower() for s in _CAMOFOX_ONLY_RAW.split(",") if s.strip()}
 
-# Domains that are entirely skipped from extraction (no fetch attempted).
-# Returns a stub message explaining the skip. Comma-separated, matches domain + all subdomains.
-_SKIP_SITES_RAW = os.environ.get("SKIP_SITES", "").strip()
-SKIP_SITES = {s.strip().lower() for s in _SKIP_SITES_RAW.split(",") if s.strip()}
 
 # ── AI Summarizer Configuration ─────────────────────────────────────────────
 # When enabled, extracted content is summarized via an OpenAI-compatible API
@@ -554,17 +550,6 @@ def _fetch_url(url, include_images=False):
             return _apply_summarizer(result)
         return None
 
-    # ── Skip sites entirely (configured via SKIP_SITES) ──────────────
-    if _is_skip_site(domain):
-        log.info("skip-site: %s (domain in SKIP_SITES list)", url)
-        return {
-            "url": url,
-            "title": f"Content from {domain} was skipped",
-            "content": f"This page from {domain} was skipped during extraction as configured by SKIP_SITES. The raw content is not available.",
-            "raw_content": f"This page from {domain} was skipped during extraction as configured by SKIP_SITES. The raw content is not available.",
-            "source": "skipped",
-        }
-
     # ── Reddit special handling ──────────────────────────────────────
     if _is_reddit_url(domain, url):
         log.info("reddit fetch: %s (custom scraper via Camoufox)", url)
@@ -635,18 +620,6 @@ def _is_camofox_only_site(domain):
         if candidate in CAMOFOX_ONLY_SITES:
             return True
     return False
-
-def _is_skip_site(domain):
-    """Check if a domain is in the SKIP_SITES list (incl. subdomains)."""
-    if not SKIP_SITES:
-        return False
-    parts = domain.split(".")
-    for i in range(len(parts)):
-        candidate = ".".join(parts[i:])
-        if candidate in SKIP_SITES:
-            return True
-    return False
-
 
 def _fetch_reddit_custom(url):
     """Fetch Reddit content using the Hermes reddit-extract plugin approach.

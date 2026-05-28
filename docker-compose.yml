@@ -47,7 +47,6 @@ services:
       - TAVILY_SHIM_HOST=0.0.0.0
       - TAVILY_SHIM_PORT=33879
       - CAMOFOX_ONLY_SITES=${CAMOFOX_ONLY_SITES:-linkedin.com,facebook.com,x.com}
-      - SKIP_SITES=${SKIP_SITES:-}
       - SUMMARIZE_EXTRACT=${SUMMARIZE_EXTRACT:-true}
       - SUMMARIZER_API_KEY=${SUMMARIZER_API_KEY}
       - SUMMARIZER_BASE_URL=${SUMMARIZER_BASE_URL:-https://opencode.ai/zen/go/v1}
