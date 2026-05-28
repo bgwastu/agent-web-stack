@@ -13,6 +13,7 @@ services:
       - "9377:9377"
     networks:
       - webstack-net
+      - searxng-net
     environment:
       - PROXY_STRATEGY=single
       - PROXY_HOST=${PROXY_HOST:-10.0.0.2}
@@ -66,7 +67,8 @@ services:
 
   # ── SearXNG Meta-Search ────────────────────────────
   searxng:
-    image: searxng/searxng:latest
+    build:
+      context: ./searxng
     container_name: searxng
     restart: unless-stopped
     ports:
@@ -76,6 +78,8 @@ services:
     environment:
       - SEARXNG_BASE_URL=http://localhost:8880
       - SEARXNG_SECRET=${SEARXNG_SECRET:?required}
+      - TAVILY_API_KEY=${TAVILY_API_KEY}
+      - SCAVIO_API_KEY=${SCAVIO_API_KEY}
     volumes:
       - searxng_config:/etc/searxng
       - ./searxng/settings.yml:/etc/searxng/settings.yml:ro

@@ -2798,3 +2798,29 @@ engines:
     headers:
       Content-Type: application/json
     weight: 2.0
+  # Google via Camoufox anti-detection browser — bypasses CAPTCHAs and rate limits
+  - name: google camofox
+    engine: google_camofox
+    shortcut: gc
+    camofox_url: http://camofox-browser:9377
+    enable_http: true
+    timeout: 15.0
+    categories: general
+    weight: 3.0
+    disabled: false
+  # Scavio Google Search API — paid fallback after google camofox
+  - name: scavio
+    engine: scavio
+    shortcut: scv
+    scavio_api_key: $SCAVIO_API_KEY
+    timeout: 10.0
+    weight: 1.5
+    disabled: false
+  # Tavily Search API — last resort fallback
+  - name: tavily
+    engine: tavily
+    shortcut: tv
+    tavily_api_key: $TAVILY_API_KEY
+    timeout: 10.0
+    weight: 0.5
+    disabled: false

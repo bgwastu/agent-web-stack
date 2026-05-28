@@ -9,10 +9,10 @@ Routes:
   GET  /health   — Health check
 
 Fetch strategy (extract):
-  1. Reddit URLs → Camoufox browser (direct page rendering)
-  2. Non-Reddit URLs → markdown.new → if error JSON, fallback to Camoufox
-  3. File URLs → markdown.new/file-to-markdown
-  4. llmstxt.org /llms.txt detection for structured content
+  1. Camoufox-only (CAMOFOX_ONLY_SITES) → Camoufox browser
+  2. Reddit URLs → Arctic Shift → PullPush → chained fallback
+  3. File URLs → markdown.new/file-to-markdown → chained fallback
+  4. Normal URLs → direct HTTP → markdown.new → r.jina.ai → Camoufox → None
 """
 
 import json
@@ -521,13 +521,23 @@ def _apply_summarizer(result):
 
 
 def _fetch_url(url, include_images=False):
-    """Extract content from a URL using the best strategy.
+    """Extract content from a URL using a multi-tier fallback chain.
 
-    Strategy:
-      1. Reddit URLs → Camoufox browser (renders JS, extracts clean text)
-      2. Detect if URL points to a downloadable file → file-to-markdown
-      3. Non-Reddit URLs → markdown.new first, JSON error → Camoufox fallback
-      4. Also checks for /llms.txt on the domain
+    Normal sites (outside CAMOFOX_ONLY_SITES):
+      Tier 1: Direct HTTP GET (fastest, static pages)
+      Tier 2: markdown.new/<url> (JS rendering, clean markdown)
+      Tier 3: r.jina.ai/<url> (JS rendering, markdown, fallback reader)
+      Tier 4: Manual Camoufox browser (full JS + proxy for block-heavy sites)
+      Tier 5: All exhausted → None
+
+    CAMOFOX_ONLY_SITES (linkedin, facebook, x.com, etc.):
+      Camoufox browser directly (bypasses tiers 1-3)
+
+    Reddit URLs get their own Arctic Shift / PullPush API chain first,
+    then fall through to the chained extract above.
+
+    File URLs get markdown.new/file-to-markdown first,
+    then fall through to the chained extract above.
 
     After fetching, if SUMMARIZE_EXTRACT is enabled and content is large,
     runs it through an LLM summarizer. Returns `content` (not `raw_content`)
@@ -561,7 +571,7 @@ def _fetch_url(url, include_images=False):
         result = _fetch_reddit_custom(url)
         if result:
             return _apply_summarizer(result)
-        log.info("reddit scraper returned empty, fallback to Camoufox: %s", url)
+        log.info("reddit scraper returned empty, fallback to chained extract: %s", url)
 
     # ── Detect downloadable files ────────────────────────────────────
     if _is_file_url(url):
@@ -569,17 +579,36 @@ def _fetch_url(url, include_images=False):
         result = _fetch_via_markdown_file(url)
         if result:
             return _apply_summarizer(result)
-        return _apply_summarizer(_extract_via_camoufox(url, include_images))
+        log.info("file-to-markdown failed, fallback to chained extract: %s", url)
 
-    # ── Standard URL: markdown.new first, Camoufox fallback ─────────
-    log.info("markdown.new fetch: %s", url)
+    # ── Chained fallback for normal URLs ─────────────────────────────
+    # Tier 1: Direct HTTP fetch (fastest, free, static pages)
+    log.info("tier-1 direct fetch: %s", url)
+    result = _fetch_direct(url)
+    if result:
+        return _apply_summarizer(result)
+
+    # Tier 2: markdown.new (renders JS, returns clean markdown)
+    log.info("tier-2 markdown.new: %s", url)
     result = _fetch_via_markdown_new(url)
     if result:
         return _apply_summarizer(result)
 
-    # ── Camoufox fallback ────────────────────────────────────────────
-    log.info("markdown.new failed, fallback to Camoufox: %s", url)
-    return _apply_summarizer(_extract_via_camoufox(url, include_images))
+    # Tier 3: r.jina.ai Reader (JS rendering, markdown output)
+    log.info("tier-3 r.jina.ai: %s", url)
+    result = _fetch_via_jina(url)
+    if result:
+        return _apply_summarizer(result)
+
+    # Tier 4: Manual Camoufox browser (full JS, proxy for block-heavy sites)
+    log.info("tier-4 Camoufox browser: %s", url)
+    result = _extract_via_camoufox(url, include_images)
+    if result:
+        return _apply_summarizer(result)
+
+    # Tier 5: All exhausted — nothing could extract this URL
+    log.warning("all 5 extract tiers failed for: %s", url)
+    return None
 
 
 def _is_reddit_url(domain, url):
@@ -978,6 +1007,109 @@ def _fetch_via_markdown_file(url):
         }
     except Exception as e:
         log.info("markdown.new/file fetch failed for %s: %s", url, e)
+        return None
+
+
+def _fetch_direct(url):
+    """Fetch page content via direct HTTP GET with browser-like User-Agent.
+
+    First tier in the fallback chain — fastest, free, works for static pages.
+    Strips HTML tags, extracts content. Returns None on failure or if content
+    is too short (< 100 chars — likely a captcha/block page).
+    """
+    try:
+        req = urllib.request.Request(
+            url,
+            method="GET",
+            headers={
+                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
+                              " (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.5",
+            },
+        )
+        # Do NOT follow redirects that change protocol (http→https) ourselves;
+        # urllib handles redirects, but set to cap at reasonable depth
+        resp = urllib.request.urlopen(req, timeout=15)
+        raw = resp.read().decode("utf-8", errors="replace")
+
+        # Extract title
+        title = ""
+        title_match = re.search(r'<title[^>]*>([^<]+)</title>', raw, re.IGNORECASE | re.DOTALL)
+        if title_match:
+            title = unescape(title_match.group(1).strip())
+
+        # Strip script/style blocks, then strip HTML tags
+        content = re.sub(r'<script[^>]*>.*?</script>', '', raw, flags=re.DOTALL | re.IGNORECASE)
+        content = re.sub(r'<style[^>]*>.*?</style>', '', content, flags=re.DOTALL | re.IGNORECASE)
+        content = re.sub(r'<[^>]+>', ' ', content)
+        content = re.sub(r'\s+', ' ', content).strip()
+
+        # Too little content → likely blocked / captcha
+        if len(content) < 100:
+            log.info("direct fetch returned too little content (%d chars) for %s", len(content), url)
+            return None
+
+        if len(content) > MAX_CONTENT_LENGTH:
+            content = content[:MAX_CONTENT_LENGTH] + "\n\n[... content truncated ...]"
+
+        return {
+            "url": url,
+            "title": title or _extract_title_from_url(url),
+            "raw_content": content,
+            "source": "direct-fetch",
+        }
+    except Exception as e:
+        log.info("direct fetch failed for %s: %s", url, e)
+        return None
+
+
+def _fetch_via_jina(url):
+    """Fetch page content via r.jina.ai Reader API (free, no auth needed).
+
+    Jina Reader renders JS and returns clean markdown. Response format is
+    nearly identical to markdown.new: Title: / URL Source: / Markdown Content:
+    markers. Returns None on failure or empty content.
+    """
+    jina_url = f"https://r.jina.ai/{url}"
+    try:
+        req = urllib.request.Request(
+            jina_url,
+            method="GET",
+            headers={
+                "User-Agent": "tavily-shim/2.0",
+                "Accept": "text/plain,text/markdown,*/*",
+            },
+        )
+        resp = urllib.request.urlopen(req, timeout=30)
+        raw = resp.read().decode("utf-8", errors="replace")
+
+        # Parse format: Title: ... | URL Source: ... | Markdown Content: ...
+        title = ""
+        title_match = re.search(r"^Title:\s*(.+)$", raw, re.MULTILINE)
+        if title_match:
+            title = title_match.group(1).strip()
+
+        # Content after "Markdown Content:" marker (same as markdown.new)
+        content_match = re.split(r"^Markdown Content:\s*$", raw, flags=re.MULTILINE)
+        content = content_match[1].strip() if len(content_match) > 1 else raw
+
+        if len(content) > MAX_CONTENT_LENGTH:
+            content = content[:MAX_CONTENT_LENGTH] + "\n\n[... content truncated ...]"
+
+        # Empty / too-short content
+        if len(content.strip()) < 50:
+            log.info("jina reader returned empty content for %s", url)
+            return None
+
+        return {
+            "url": url,
+            "title": title or _extract_title_from_url(url),
+            "raw_content": content,
+            "source": "r.jina.ai",
+        }
+    except Exception as e:
+        log.info("jina reader fetch failed for %s: %s", url, e)
         return None
 
 
