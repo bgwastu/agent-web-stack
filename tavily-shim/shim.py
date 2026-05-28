@@ -11,8 +11,14 @@ Routes:
 Fetch strategy (extract):
   1. Camoufox-only (CAMOFOX_ONLY_SITES) → Camoufox browser
   2. Reddit URLs → Arctic Shift → PullPush → chained fallback
-  3. File URLs → markdown.new/file-to-markdown → chained fallback
-  4. Normal URLs → direct HTTP → markdown.new → r.jina.ai → Camoufox → None
+  3. GitHub URLs → raw.githubusercontent.com / GitHub API (skip_summary=True)
+  4. File URLs → markdown.new/file-to-markdown → chained fallback
+  5. Normal URLs → direct HTTP → markdown.new → r.jina.ai → Camoufox → None
+
+AI summarization is automatically skipped for:
+  - GitHub source results (github-readme, github-raw, github-api-*, github-wiki)
+  - raw.githubusercontent.com, gist.githubusercontent.com domains
+  - Any domain listed in SKIP_SUMMARY_SITES env var
 """
 
 import json
@@ -40,6 +46,12 @@ PORT = int(os.environ.get("TAVILY_SHIM_PORT", "33879"))
 # Matches the domain and all its subdomains/paths.
 _CAMOFOX_ONLY_RAW = os.environ.get("CAMOFOX_ONLY_SITES", "").strip()
 CAMOFOX_ONLY_SITES = {s.strip().lower() for s in _CAMOFOX_ONLY_RAW.split(",") if s.strip()}
+
+# Domains that skip AI summarization (raw content returned as-is)
+# Comma-separated, matches domain + all subdomains.
+# Sources starting with "github-" also always skip summarization.
+_SKIP_SUMMARY_SITES_RAW = os.environ.get("SKIP_SUMMARY_SITES", "").strip()
+SKIP_SUMMARY_SITES = {s.strip().lower() for s in _SKIP_SUMMARY_SITES_RAW.split(",") if s.strip()}
 
 
 # ── AI Summarizer Configuration ─────────────────────────────────────────────
@@ -486,6 +498,33 @@ def _summarize_content(content, url="", title=""):
 
 # ── Fetch Strategy ─────────────────────────────────────────────────────────
 
+def _should_skip_summary(result):
+    """Check if summarization should be skipped for this result.
+
+    Skips for:
+    - Results explicitly marked with skip_summary=True
+    - Sources starting with "github-" (already clean raw/markdown)
+    - Domains in SKIP_SUMMARY_SITES config
+    """
+    if result.get("skip_summary"):
+        return True
+    source = result.get("source", "")
+    if source.startswith("github-"):
+        return True
+    url = result.get("url", "")
+    if url:
+        domain = urlparse(url).netloc.lower()
+        # Always skip summarization for raw GitHub/gist content
+        if domain in ("raw.githubusercontent.com", "gist.githubusercontent.com"):
+            return True
+        if SKIP_SUMMARY_SITES:
+            parts = domain.split(".")
+            for i in range(len(parts)):
+                if ".".join(parts[i:]) in SKIP_SUMMARY_SITES:
+                    return True
+    return False
+
+
 def _apply_summarizer(result):
     """Run a fetch result through the AI content cleaner.
 
@@ -493,8 +532,17 @@ def _apply_summarizer(result):
     from large pages. The clean content is returned as `raw_content` (≤4900 chars)
     so the Tavily provider sees content < 5000 chars and Hermes skips its own LLM
     summarization. Small content passes through untouched.
+
+    Skips summarization entirely for GitHub sources and domains in
+    SKIP_SUMMARY_SITES (raw content returned as-is).
     """
     if not result or not result.get("raw_content"):
+        return result
+
+    if _should_skip_summary(result):
+        raw = result["raw_content"]
+        result["content"] = raw
+        result["summarized"] = False
         return result
 
     raw = result["raw_content"]
@@ -558,6 +606,14 @@ def _fetch_url(url, include_images=False):
             return _apply_summarizer(result)
         log.info("reddit scraper returned empty, fallback to chained extract: %s", url)
 
+    # ── GitHub special handling ────────────────────────────────────
+    if _is_github_url(domain):
+        log.info("github fetch: %s (recognized GitHub domain, passthrough)", url)
+        # First-tier handler returns None → falls through to chained fallback
+        result = _fetch_via_github(url)
+        if result:
+            return _apply_summarizer(result)
+
     # ── Detect downloadable files ────────────────────────────────────
     if _is_file_url(url):
         log.info("file fetch: %s (via markdown.new/file-to-markdown)", url)
@@ -620,6 +676,278 @@ def _is_camofox_only_site(domain):
         if candidate in CAMOFOX_ONLY_SITES:
             return True
     return False
+
+
+# ── GitHub Handler ─────────────────────────────────────────────────────────
+
+_GITHUB_DOMAINS = {"github.com", "raw.githubusercontent.com",
+                   "gist.github.com", "gist.githubusercontent.com"}
+
+
+def _is_github_url(domain):
+    """Check if a domain is a GitHub domain."""
+    if not domain:
+        return False
+    parts = domain.split(".")
+    for i in range(len(parts)):
+        candidate = ".".join(parts[i:])
+        if candidate in _GITHUB_DOMAINS:
+            return True
+    return False
+
+
+def _fetch_via_github(url):
+    """Extract content from GitHub URLs using raw/API strategy.
+
+    Handles:
+      raw.githubusercontent.com / gist.githubusercontent.com
+        → Returns None (falls through to chained fallback tier 1 direct fetch)
+
+      github.com/user/repo                      → README via raw.githubusercontent.com
+      github.com/user/repo/blob/branch/path     → raw file
+      github.com/user/repo/tree/branch/path     → directory listing (GitHub API)
+      github.com/user/repo/issues/N             → issue body + comments (GitHub API)
+      github.com/user/repo/pull/N               → PR body + comments (GitHub API)
+      github.com/user/repo/wiki[/Page]          → wiki page (raw.githubusercontent.com/wiki)
+      gist.github.com/user/hash                 → raw gist content
+
+    All results are marked skip_summary=True to bypass the AI summarizer
+    (GitHub content is already clean markdown/code, no LLM needed).
+    """
+    parsed = urlparse(url)
+    domain = parsed.netloc.lower()
+    path = parsed.path.rstrip("/")
+
+    # raw / gist content URLs → direct fetch in tier 1 (already works)
+    if domain in ("raw.githubusercontent.com", "gist.githubusercontent.com"):
+        return None
+
+    # ── Gist URLs: gist.github.com/user/hash ──
+    if domain == "gist.github.com":
+        match = re.match(r"^/([^/]+)/([^/]+)", path)
+        if not match:
+            return None
+        return _github_fetch_gist(match.group(1), match.group(2), url)
+
+    # ── Standard github.com: /user/repo/rest ──
+    match = re.match(r"^/([^/]+)/([^/]+)(/.*)?$", path)
+    if not match:
+        return None
+    user = match.group(1)
+    repo = match.group(2)
+    rest = (match.group(3) or "").lstrip("/")
+
+    if not rest:
+        return _github_fetch_readme(user, repo, url)
+    if rest.startswith("blob/"):
+        parts = rest.split("/", 2)
+        if len(parts) >= 3:
+            return _github_fetch_raw_file(user, repo, parts[1], parts[2], url)
+    if rest.startswith("tree/"):
+        parts = rest.split("/", 2)
+        dirpath = parts[2] if len(parts) >= 3 else ""
+        return _github_fetch_tree(user, repo, parts[1], dirpath, url)
+    issue_match = re.match(r"^(issues|pull)/(\d+)/?$", rest)
+    if issue_match:
+        return _github_fetch_issue(user, repo, issue_match.group(1),
+                                    issue_match.group(2), url)
+    if rest.startswith("wiki"):
+        return _github_fetch_wiki(user, repo, rest, url)
+
+    return None
+
+
+def _github_raw_fetch(raw_url, original_url):
+    """Fetch raw content from a URL, returning result keyed to original_url."""
+    try:
+        req = urllib.request.Request(
+            raw_url, method="GET",
+            headers={
+                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
+                              " (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
+                "Accept": "text/html,text/plain,*/*",
+            },
+        )
+        resp = urllib.request.urlopen(req, timeout=15)
+        content = resp.read().decode("utf-8", errors="replace")
+        if len(content.strip()) < 20:
+            return None
+        if len(content) > MAX_CONTENT_LENGTH:
+            content = content[:MAX_CONTENT_LENGTH] + "\n\n[... content truncated ...]"
+        return {
+            "url": original_url,
+            "title": _extract_title_from_url(original_url),
+            "raw_content": content,
+            "source": "github-raw",
+            "skip_summary": True,
+        }
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return None
+        log.info("github raw HTTP error for %s: %s", raw_url, e)
+        return None
+    except Exception as e:
+        log.info("github raw fetch failed for %s: %s", raw_url, e)
+        return None
+
+
+def _github_fetch_readme(user, repo, original_url):
+    """Fetch README.md from repo root (tries main → master)."""
+    for branch in ("main", "master"):
+        raw_url = f"https://raw.githubusercontent.com/{user}/{repo}/{branch}/README.md"
+        result = _github_raw_fetch(raw_url, original_url)
+        if result:
+            result["source"] = "github-readme"
+            result["title"] = f"{user}/{repo}"
+            return result
+    return None
+
+
+def _github_fetch_raw_file(user, repo, branch, filepath, original_url):
+    """Fetch a file via raw.githubusercontent.com."""
+    raw_url = f"https://raw.githubusercontent.com/{user}/{repo}/{branch}/{filepath}"
+    return _github_raw_fetch(raw_url, original_url)
+
+
+def _github_fetch_tree(user, repo, branch, dirpath, original_url):
+    """Fetch directory listing via GitHub API."""
+    api_url = f"https://api.github.com/repos/{user}/{repo}/contents/{dirpath}?ref={branch}"
+    try:
+        req = urllib.request.Request(
+            api_url, method="GET",
+            headers={
+                "Accept": "application/vnd.github.v3+json",
+                "User-Agent": "tavily-shim/2.0",
+            },
+        )
+        resp = urllib.request.urlopen(req, timeout=15)
+        data = json.loads(resp.read())
+
+        if isinstance(data, dict):
+            download_url = data.get("download_url")
+            if download_url:
+                return _github_raw_fetch(download_url, original_url)
+            return _github_fetch_raw_file(user, repo, branch, dirpath, original_url)
+
+        lines = [f"# {user}/{repo}/{dirpath}"]
+        if isinstance(data, list):
+            for item in data:
+                name = item.get("name", "")
+                icon = "📁" if item.get("type") == "dir" else "📄"
+                lines.append(f"- {icon} {name}")
+        return {
+            "url": original_url,
+            "title": f"{user}/{repo}/{dirpath}",
+            "raw_content": "\n".join(lines),
+            "source": "github-api-tree",
+            "skip_summary": True,
+        }
+    except urllib.error.HTTPError as e:
+        if e.code == 403:
+            log.warning("github API rate-limited for tree fetch")
+            return None
+        log.info("github API tree fetch failed: %s", e)
+        return None
+    except Exception as e:
+        log.info("github API tree fetch failed: %s", e)
+        return None
+
+
+def _github_fetch_issue(user, repo, issue_type, issue_num, original_url):
+    """Fetch issue/PR body + comments via GitHub API."""
+    api_url = f"https://api.github.com/repos/{user}/{repo}/{issue_type}/{issue_num}"
+    try:
+        req = urllib.request.Request(
+            api_url, method="GET",
+            headers={
+                "Accept": "application/vnd.github.v3+json",
+                "User-Agent": "tavily-shim/2.0",
+            },
+        )
+        resp = urllib.request.urlopen(req, timeout=15)
+        data = json.loads(resp.read())
+
+        title = data.get("title", "")
+        body = data.get("body") or ""
+        state = data.get("state", "")
+        author = data.get("user", {}).get("login", "") if data.get("user") else ""
+        labels = [l.get("name", "") for l in data.get("labels", [])]
+
+        lines = [
+            f"# {title}",
+            f"**{issue_type[:-1].title()} #{issue_num}** · {state} · by @{author}",
+        ]
+        if labels:
+            lines.append(f"Labels: {', '.join(labels)}")
+        lines.append("")
+        lines.append(body if body else "*(No description)*")
+
+        # Fetch top comments
+        comments_url = data.get("comments_url", "")
+        if comments_url:
+            try:
+                req2 = urllib.request.Request(
+                    comments_url,
+                    headers={
+                        "Accept": "application/vnd.github.v3+json",
+                        "User-Agent": "tavily-shim/2.0",
+                    },
+                )
+                comments = json.loads(urllib.request.urlopen(req2, timeout=10).read())
+                if comments:
+                    lines.append("")
+                    lines.append(f"## Comments ({len(comments)})")
+                    for c in comments[:20]:
+                        c_author = c.get("user", {}).get("login", "unknown")
+                        c_body = (c.get("body") or "")[:2000]
+                        lines.append("")
+                        lines.append(f"**@{c_author}**")
+                        lines.append(c_body)
+                    if len(comments) > 20:
+                        lines.append("")
+                        lines.append(f"*... and {len(comments) - 20} more comments*")
+            except Exception:
+                pass
+
+        return {
+            "url": original_url,
+            "title": title,
+            "raw_content": "\n".join(lines),
+            "source": f"github-api-{issue_type}",
+            "skip_summary": True,
+        }
+    except urllib.error.HTTPError as e:
+        if e.code == 403:
+            log.warning("github API rate-limited for issue/PR fetch")
+            return None
+        log.info("github API issue fetch failed: %s", e)
+        return None
+    except Exception as e:
+        log.info("github API issue fetch failed: %s", e)
+        return None
+
+
+def _github_fetch_wiki(user, repo, rest, original_url):
+    """Fetch wiki page via raw.githubusercontent.com/wiki."""
+    wiki_path = rest.replace("wiki", "", 1).lstrip("/")
+    if wiki_path:
+        raw_url = f"https://raw.githubusercontent.com/wiki/{user}/{repo}/{wiki_path}.md"
+        result = _github_raw_fetch(raw_url, original_url)
+        if result:
+            result["source"] = "github-wiki"
+            return result
+    raw_url = f"https://raw.githubusercontent.com/wiki/{user}/{repo}/Home.md"
+    result = _github_raw_fetch(raw_url, original_url)
+    if result:
+        result["source"] = "github-wiki"
+    return result
+
+
+def _github_fetch_gist(user, gist_hash, original_url):
+    """Fetch gist content via gist.githubusercontent.com."""
+    raw_url = f"https://gist.githubusercontent.com/{user}/{gist_hash}/raw"
+    return _github_raw_fetch(raw_url, original_url)
+
 
 def _fetch_reddit_custom(url):
     """Fetch Reddit content using the Hermes reddit-extract plugin approach.
